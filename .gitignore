@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Models and data
+models/
+*.bin
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Audio/video artifacts
+*.wav
+*.mp3
+*.mp4
+*.webm
+*.ogg
+!docs/**/*.wav
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Node (for web frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+out/
+build/
+
+# ChromaDB / vector stores
+chroma/
+*.chroma
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
