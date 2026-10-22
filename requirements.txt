@@ -39,3 +39,6 @@ python-docx>=1.1.0
 
 # Phase 1.5 — Post-call processing
 # (uses standard sqlite3, no extra deps needed)
+
+# VAD (optional — energy VAD is used as primary)
+webrtcvad>=2.0.10

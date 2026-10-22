@@ -76,3 +76,8 @@ extract_action_items: true
 
 # Max call duration (seconds)
 max_duration: 1800
+
+# Avatar
+avatar:
+  image: ""
+  position: "right"

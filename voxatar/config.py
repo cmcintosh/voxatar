@@ -82,6 +82,10 @@ class AgentConfig:
     # Agent configs directory (for shareable links)
     agents_dir: str = "/app/agents"
 
+    # Avatar
+    avatar_image: str = ""  # path or URL to avatar image
+    avatar_position: str = "right"  # "right" or "center"
+
     # Privacy
     require_consent: bool = True
     consent_message: str = (
@@ -141,6 +145,8 @@ class AgentConfig:
             "knowledge_ollama_url": "knowledge_ollama_url",
             "flow_mode": "flow_mode",
             "agents_dir": "agents_dir",
+            "avatar_image": "avatar_image",
+            "avatar_position": "avatar_position",
             "host": "host",
             "port": "port",
             "generate_summary": "generate_summary",
@@ -156,6 +162,14 @@ class AgentConfig:
                 kwargs[dc_key] = data[yaml_key]
 
         config = cls(**kwargs)
+
+        # Handle nested avatar: section in YAML
+        avatar_section = data.get("avatar")
+        if isinstance(avatar_section, dict):
+            if "image" in avatar_section:
+                config.avatar_image = avatar_section["image"]
+            if "position" in avatar_section:
+                config.avatar_position = avatar_section["position"]
 
         # If system prompt was auto-built, override
         if not data.get("system_prompt") and (objectives or questions):

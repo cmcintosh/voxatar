@@ -33,12 +33,14 @@ from fastapi import (
     HTTPException,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from voxatar.config import AgentConfig
 from voxatar.pipeline import VoiceAgentPipeline, TranscriptEvent
 from voxatar.transport.webrtc_adapter import WebRTCTransport
+from voxatar.transport.websocket_adapter import WebSocketTransport
+from voxatar.tts.edge_tts_adapter import EdgeTTS
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,7 @@ class VoxatarServer:
         )
         self.pipeline: Optional[VoiceAgentPipeline] = None
         self.transport: Optional[WebRTCTransport] = None
+        self.tts: Optional[EdgeTTS] = None
         self._websocket_clients: list[WebSocket] = []
 
         # Phase 1.5 — Initialize database
@@ -91,6 +94,13 @@ class VoxatarServer:
             )
         except ImportError:
             logger.warning("KnowledgeBase not available — RAG disabled")
+
+        # Initialize TTS for voice listing
+        try:
+            self.tts = EdgeTTS(voice=config.voice_id, language=config.language)
+        except Exception as exc:
+            logger.warning(f"TTS initialization failed: {exc}")
+            self.tts = None
 
         self._setup_middleware()
         self._setup_routes()
@@ -245,6 +255,49 @@ class VoxatarServer:
                 logger.error(f"WebSocket error: {e}")
                 if ws in self._websocket_clients:
                     self._websocket_clients.remove(ws)
+
+        # ─── WebSocket Audio Endpoint (Phase 1.5+) ─────────────────────
+
+        @self.app.websocket("/ws/audio")
+        async def audio_websocket(ws: WebSocket):
+            """WebSocket endpoint for real-time audio streaming."""
+            logger.info("[INFO] ws/audio: WebSocket connection attempt")
+
+            ws_transport = None
+            try:
+                # Initialize pipeline if not already done
+                if not self.pipeline:
+                    self.pipeline = VoiceAgentPipeline(self.config)
+
+                    # Set up transcript callback to broadcast to WebSocket clients
+                    def on_transcript(event: TranscriptEvent):
+                        asyncio.ensure_future(self._broadcast_transcript(event))
+
+                    self.pipeline.on_transcript(on_transcript)
+
+                    await self.pipeline.initialize()
+
+                # Start the pipeline audio processing loop if not already running
+                if not hasattr(self.pipeline, '_audio_loop_task') or self.pipeline._audio_loop_task is None:
+                    self.pipeline._audio_loop_task = asyncio.ensure_future(self.pipeline._audio_loop())
+                    logger.info("[INFO] ws/audio: Pipeline audio loop started")
+
+                # Create WebSocket transport with pipeline and config
+                ws_transport = WebSocketTransport(ws, self.pipeline, self.config)
+                self.pipeline.set_websocket_transport(ws_transport)
+
+                # Run the transport session (accepts WS, blocks until disconnect)
+                await ws_transport.handle_session()
+
+            except WebSocketDisconnect:
+                logger.info("[INFO] ws/audio: WebSocket disconnected")
+            except Exception as e:
+                logger.error(f"[ERROR] ws/audio: WebSocket error: {e}", exc_info=True)
+            finally:
+                # Clean up
+                if self.pipeline and self.pipeline._websocket_transport is ws_transport:
+                    self.pipeline.set_websocket_transport(None)
+                logger.info("[INFO] ws/audio: WebSocket session cleaned up")
 
         # ─── Call History API (Phase 1.5) ─────────────────────────────
 

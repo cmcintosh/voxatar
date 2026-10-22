@@ -1,4 +1,4 @@
-import type { ConnectionState } from "../hooks/useWebRTC";
+import type { ConnectionState } from "../hooks/useAudioSocket";
 
 interface ControlsProps {
   connectionState: ConnectionState;
@@ -6,8 +6,23 @@ interface ControlsProps {
   onStartCall: () => void;
   onEndCall: () => void;
   onMute: () => void;
-  onBargeIn: () => void;
 }
+
+const STATUS_TEXT: Record<ConnectionState, string> = {
+  idle: "Ready to start a call",
+  connecting: "Connecting...",
+  connected: "Connected — speak to the agent",
+  failed: "Connection failed — try again",
+  ended: "Call ended",
+};
+
+const STATUS_DOT: Record<ConnectionState, string> = {
+  idle: "bg-gray-400",
+  connecting: "bg-yellow-400 animate-pulse",
+  connected: "bg-green-500",
+  failed: "bg-red-500",
+  ended: "bg-gray-400",
+};
 
 export default function Controls({
   connectionState,
@@ -15,13 +30,13 @@ export default function Controls({
   onStartCall,
   onEndCall,
   onMute,
-  onBargeIn,
 }: ControlsProps) {
-  const inCall = connectionState === "connected" || connectionState === "connecting";
-  const isConnecting = connectionState === "connecting";
+  const inCall =
+    connectionState === "connected" || connectionState === "connecting";
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      {/* Buttons */}
       <div className="flex items-center justify-center gap-3">
         {/* Start / End call button */}
         {!inCall ? (
@@ -43,7 +58,7 @@ export default function Controls({
                 d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"
               />
             </svg>
-            {isConnecting ? "Connecting..." : "Start Call"}
+            Start Call
           </button>
         ) : (
           <button
@@ -109,40 +124,14 @@ export default function Controls({
             )}
           </button>
         )}
-
-        {/* Barge-in button */}
-        {inCall && (
-          <button
-            onClick={onBargeIn}
-            className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-600 hover:bg-amber-100 transition-colors"
-            title="Interrupt agent"
-          >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M13 5l7 7-7 7M5 5l7 7-7 7"
-              />
-            </svg>
-          </button>
-        )}
       </div>
 
       {/* Connection status */}
-      <div className="mt-4 text-center">
-        <p className="text-xs text-gray-400">
-          {connectionState === "idle" && "Ready to start a call"}
-          {connectionState === "connecting" && "Establishing WebRTC connection..."}
-          {connectionState === "connected" && "Connected — speak to the agent"}
-          {connectionState === "failed" && "Connection failed — try again"}
-          {connectionState === "ended" && "Call ended"}
-        </p>
+      <div className="mt-4 flex items-center justify-center gap-2">
+        <div
+          className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[connectionState]}`}
+        />
+        <p className="text-xs text-gray-500">{STATUS_TEXT[connectionState]}</p>
       </div>
     </div>
   );

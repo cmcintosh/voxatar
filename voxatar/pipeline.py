@@ -32,6 +32,7 @@ from voxatar.llm import Message
 from voxatar.llm.ollama_adapter import OllamaLLM
 from voxatar.stt.whisper_adapter import WhisperSTT
 from voxatar.tts.edge_tts_adapter import EdgeTTS
+from voxatar.vad import EnergyVAD
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,11 @@ class VoiceAgentPipeline:
         self._audio_in_queue: asyncio.Queue = asyncio.Queue()
         self._transcript_callbacks: list[Callable] = []
         self._audio_out_callback: Optional[Callable] = None
+        self._websocket_transport = None  # WebSocket transport for state updates
+        self._audio_loop_task = None  # Reference to the audio loop task
         self._session_start: Optional[float] = None
         self._barge_in_event = asyncio.Event()
+        self._vad = EnergyVAD()  # Energy-based VAD for speech detection
 
         # Phase 1.5 — Conversation flow manager
         self.flow_manager: Optional[FlowManager] = None
@@ -156,6 +160,7 @@ class VoiceAgentPipeline:
             self._emit_transcript("system", self.config.consent_message)
 
         self._session_start = time.time()
+        logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.LISTENING.value}")
         self.state = SessionState.LISTENING
 
         # Phase 1.5 — Create call record in database
@@ -178,6 +183,27 @@ class VoiceAgentPipeline:
     def on_audio_out(self, callback: Callable[[bytes], None]) -> None:
         """Register a callback for outbound audio."""
         self._audio_out_callback = callback
+
+    def set_websocket_transport(self, transport) -> None:
+        """Set a WebSocket transport for sending state updates and transcripts."""
+        self._websocket_transport = transport
+
+    async def _send_ws_state(self, state: str) -> None:
+        """Send a state update via the websocket transport if set."""
+        if self._websocket_transport:
+            try:
+                msg = json.dumps({"type": "state", "state": state})
+                await self._websocket_transport.send(msg)
+            except Exception as e:
+                logger.warning(f"Failed to send ws state update: {e}")
+
+    async def _send_ws_json(self, data: dict) -> None:
+        """Send a JSON message via the websocket transport if set."""
+        if self._websocket_transport:
+            try:
+                await self._websocket_transport.send(json.dumps(data))
+            except Exception as e:
+                logger.warning(f"Failed to send ws message: {e}")
 
     async def process_audio_chunk(self, audio: bytes) -> None:
         """Feed an audio chunk into the pipeline."""
@@ -239,9 +265,12 @@ class VoiceAgentPipeline:
 
     async def _process_utterance(self, audio: bytes) -> None:
         """Process a complete utterance: STT → LLM → TTS."""
+        chunk_size = len(audio)
+        logger.info(f"[INFO] pipeline: Audio chunk received — size={chunk_size} bytes ({chunk_size / 32000:.1f}s)")
+
         if self.is_speaking:
             # Barge-in: stop current speech
-            logger.info("Barge-in detected — interrupting agent")
+            logger.info("[INFO] pipeline: Barge-in detected — interrupting agent")
             self._barge_in_event.set()
             await asyncio.sleep(0.1)  # Let the barge-in propagate
             self._barge_in_event.clear()
@@ -249,14 +278,25 @@ class VoiceAgentPipeline:
         if not self.stt:
             return
 
-        # Transcribe
-        self.state = SessionState.LISTENING
-        text = await self.stt.transcribe(audio)
-
-        if not text.strip():
+        # VAD check — skip STT if no speech detected
+        vad_has_speech = self._vad.is_speech(audio)
+        logger.info(f"[INFO] pipeline: VAD result — has_speech={vad_has_speech}")
+        if not vad_has_speech:
+            logger.info("[INFO] pipeline: No speech detected by VAD — skipping STT")
             return
 
-        logger.info(f"Transcribed: {text}")
+        # Transcribe with timing
+        self.state = SessionState.LISTENING
+        stt_start = time.time()
+        text = await self.stt.transcribe(audio)
+        stt_latency = time.time() - stt_start
+        logger.info(f"[INFO] pipeline: STT latency={stt_latency:.3f}s — text=\"{text.strip()[:100]}\"")
+
+        if not text.strip():
+            logger.info("[INFO] pipeline: STT returned empty text — skipping")
+            return
+
+        logger.info(f"[INFO] pipeline: Transcribed: {text}")
         self._emit_transcript("user", text)
         self.conversation_history.append(Message(role="user", content=text))
 
@@ -268,8 +308,10 @@ class VoiceAgentPipeline:
 
     async def _generate_and_speak(self) -> None:
         """Generate LLM response and synthesize speech."""
+        logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.THINKING.value}")
         self.state = SessionState.THINKING
         self.is_speaking = True
+        await self._send_ws_state("thinking")
 
         # Phase 1.5 — Build dynamic system prompt with flow guidance and RAG context
         system_prompt = self.config.system_prompt
@@ -290,9 +332,11 @@ class VoiceAgentPipeline:
                 logger.warning(f"RAG retrieval failed: {e}")
                 knowledge_context = None
 
-        # Stream LLM response
+        # Stream LLM response with timing
         response_text = ""
         text_chunks = []
+        llm_start = time.time()
+        logger.info(f"[INFO] pipeline: LLM request — model={self.config.llm_model}")
 
         async for token in self.llm.generate_stream(
             messages=self.conversation_history,
@@ -309,9 +353,11 @@ class VoiceAgentPipeline:
             text_chunks.append(token)
 
         response_text = response_text.strip()
+        llm_latency = time.time() - llm_start
+        logger.info(f"[INFO] pipeline: LLM latency={llm_latency:.3f}s — model={self.config.llm_model} — response=\"{response_text[:100]}\"")
 
         if response_text:
-            logger.info(f"Agent response: {response_text}")
+            logger.info(f"[INFO] pipeline: Agent response: {response_text}")
             self._emit_transcript("agent", response_text)
             self.conversation_history.append(
                 Message(role="assistant", content=response_text)
@@ -325,8 +371,15 @@ class VoiceAgentPipeline:
                 last_user = self.conversation_history[-2].content if len(self.conversation_history) >= 2 else ""
                 self.flow_manager.update(last_user, response_text)
 
-            # Synthesize speech
+            # Synthesize speech with timing
+            logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.SPEAKING.value}")
             self.state = SessionState.SPEAKING
+            await self._send_ws_state("speaking")
+
+            word_count = len(response_text.split())
+            total_audio_bytes = 0
+            tts_start = time.time()
+            logger.info(f"[INFO] pipeline: TTS synthesis — words={word_count}")
 
             async for audio_chunk in self.tts.synthesize_stream(
                 self._text_chunk_iterator(text_chunks),
@@ -334,14 +387,22 @@ class VoiceAgentPipeline:
                 language=self.config.language,
             ):
                 if self._barge_in_event.is_set():
-                    logger.info("TTS interrupted by barge-in")
+                    logger.info("[INFO] pipeline: TTS interrupted by barge-in")
                     break
 
                 if self._audio_out_callback:
-                    await self._audio_out_callback(audio_chunk)
+                    result = self._audio_out_callback(audio_chunk)
+                    if asyncio.iscoroutine(result):
+                        await result
+                total_audio_bytes += len(audio_chunk)
 
+            tts_latency = time.time() - tts_start
+            logger.info(f"[INFO] pipeline: TTS latency={tts_latency:.3f}s — words={word_count} — audio_size={total_audio_bytes} bytes")
+
+        logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.LISTENING.value}")
         self.is_speaking = False
         self.state = SessionState.LISTENING
+        await self._send_ws_state("listening")
 
     async def _text_chunk_iterator(self, chunks: list[str]) -> AsyncIterator[str]:
         """Convert a list of text chunks into an async iterator."""
@@ -373,9 +434,26 @@ class VoiceAgentPipeline:
         event = TranscriptEvent(type=event_type, text=text, is_partial=is_partial)
         for callback in self._transcript_callbacks:
             try:
-                callback(event)
+                result = callback(event)
+                # If callback is async, schedule it
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
             except Exception as e:
                 logger.error(f"Transcript callback error: {e}")
+        # Also send via websocket transport if set (async-safe best-effort)
+        if self._websocket_transport:
+            try:
+                ws_msg = json.dumps({
+                    "type": "transcript",
+                    "speaker": event_type,
+                    "text": text,
+                    "is_final": not is_partial,
+                    "timestamp": event.timestamp,
+                })
+                # Schedule the send without blocking (fire-and-forget)
+                asyncio.ensure_future(self._websocket_transport.send(ws_msg))
+            except Exception as e:
+                logger.warning(f"Failed to send transcript via websocket: {e}")
 
     def _save_transcript(self, speaker: str, text: str) -> None:
         """Save a transcript entry to the SQLite database."""
