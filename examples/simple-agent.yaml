@@ -13,7 +13,7 @@ tts_engine: edge-tts
 transport_engine: webrtc
 
 # LLM settings
-llm_model: llama3.1:8b
+llm_model: gemma4:12b
 llm_base_url: http://localhost:11434/v1
 temperature: 0.7
 max_tokens: 150

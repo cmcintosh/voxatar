@@ -313,50 +313,51 @@ class VoiceAgentPipeline:
         self.is_speaking = True
         await self._send_ws_state("thinking")
 
-        # Phase 1.5 — Build dynamic system prompt with flow guidance and RAG context
-        system_prompt = self.config.system_prompt
-        knowledge_context = None
+        try:
+            # Phase 1.5 — Build dynamic system prompt with flow guidance and RAG context
+            system_prompt = self.config.system_prompt
+            knowledge_context = None
 
-        # Add flow guidance
-        if self.flow_manager:
-            flow_guidance = self.flow_manager.get_flow_guidance()
-            if flow_guidance:
-                system_prompt = system_prompt + "\n\n" + flow_guidance
+            # Add flow guidance
+            if self.flow_manager:
+                flow_guidance = self.flow_manager.get_flow_guidance()
+                if flow_guidance:
+                    system_prompt = system_prompt + "\n\n" + flow_guidance
 
-        # Add RAG context from last user message
-        if self.rag_pipeline and self.conversation_history:
-            last_user_msg = self.conversation_history[-1].content
-            try:
-                knowledge_context = await self.rag_pipeline.get_context_for_prompt(last_user_msg)
-            except Exception as e:
-                logger.warning(f"RAG retrieval failed: {e}")
-                knowledge_context = None
+            # Add RAG context from last user message
+            if self.rag_pipeline and self.conversation_history:
+                last_user_msg = self.conversation_history[-1].content
+                try:
+                    knowledge_context = await self.rag_pipeline.get_context_for_prompt(last_user_msg)
+                except Exception as e:
+                    logger.warning(f"RAG retrieval failed: {e}")
+                    knowledge_context = None
 
-        # Stream LLM response with timing
-        response_text = ""
-        text_chunks = []
-        llm_start = time.time()
-        logger.info(f"[INFO] pipeline: LLM request — model={self.config.llm_model}")
+            # Stream LLM response with timing
+            response_text = ""
+            text_chunks = []
+            llm_start = time.time()
+            logger.info(f"[INFO] pipeline: LLM request — model={self.config.llm_model}")
 
-        async for token in self.llm.generate_stream(
-            messages=self.conversation_history,
-            system_prompt=system_prompt,
-            knowledge_context=knowledge_context,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-        ):
-            if self._barge_in_event.is_set():
-                logger.info("LLM generation interrupted by barge-in")
-                break
+            async for token in self.llm.generate_stream(
+                messages=self.conversation_history,
+                system_prompt=system_prompt,
+                knowledge_context=knowledge_context,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            ):
+                if self._barge_in_event.is_set():
+                    logger.info("LLM generation interrupted by barge-in")
+                    break
 
-            response_text += token
-            text_chunks.append(token)
+                response_text += token
+                text_chunks.append(token)
 
-        response_text = response_text.strip()
-        llm_latency = time.time() - llm_start
-        logger.info(f"[INFO] pipeline: LLM latency={llm_latency:.3f}s — model={self.config.llm_model} — response=\"{response_text[:100]}\"")
+            response_text = response_text.strip()
+            llm_latency = time.time() - llm_start
+            logger.info(f"[INFO] pipeline: LLM latency={llm_latency:.3f}s — model={self.config.llm_model} — response=\"{response_text[:100]}\"")
 
-        if response_text:
+            if response_text:
             logger.info(f"[INFO] pipeline: Agent response: {response_text}")
             self._emit_transcript("agent", response_text)
             self.conversation_history.append(
@@ -399,6 +400,11 @@ class VoiceAgentPipeline:
             tts_latency = time.time() - tts_start
             logger.info(f"[INFO] pipeline: TTS latency={tts_latency:.3f}s — words={word_count} — audio_size={total_audio_bytes} bytes")
 
+        except Exception as e:
+            logger.error(f"[ERROR] pipeline: LLM/TTS error: {e}", exc_info=True)
+            self._emit_transcript("agent", f"[Error: {str(e)[:200]}]")
+        
+        # Always return to listening state
         logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.LISTENING.value}")
         self.is_speaking = False
         self.state = SessionState.LISTENING
@@ -440,20 +446,9 @@ class VoiceAgentPipeline:
                     asyncio.ensure_future(result)
             except Exception as e:
                 logger.error(f"Transcript callback error: {e}")
-        # Also send via websocket transport if set (async-safe best-effort)
-        if self._websocket_transport:
-            try:
-                ws_msg = json.dumps({
-                    "type": "transcript",
-                    "speaker": event_type,
-                    "text": text,
-                    "is_final": not is_partial,
-                    "timestamp": event.timestamp,
-                })
-                # Schedule the send without blocking (fire-and-forget)
-                asyncio.ensure_future(self._websocket_transport.send(ws_msg))
-            except Exception as e:
-                logger.warning(f"Failed to send transcript via websocket: {e}")
+        # NOTE: Do NOT also send via _websocket_transport directly —
+        # the WebSocketTransport registers its own callback via on_transcript(),
+        # so sending here would duplicate the message.
 
     def _save_transcript(self, speaker: str, text: str) -> None:
         """Save a transcript entry to the SQLite database."""
