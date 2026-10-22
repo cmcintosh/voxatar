@@ -16,7 +16,7 @@ const stateConfig: Record<string, { label: string; emoji: string; color: string 
 export default function AvatarView({
   pipelineState,
   analyser,
-  avatarImage = "/avatar-default.svg",
+  avatarImage = "/avatar-default.png",
 }: AvatarViewProps) {
   const [mouthScale, setMouthScale] = useState(1.0);
   const animationRef = useRef<number | null>(null);

@@ -37,16 +37,15 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
   const [isMuted, setIsMuted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioNodeRef = useRef<AudioWorkletNode | null>(null);
   const isMutedRef = useRef(false);
   const onTranscriptRef = useRef(onTranscript);
   const onStateChangeRef = useRef(onStateChange);
   const onAudioReceivedRef = useRef(onAudioReceived);
 
-  // Keep callback refs up to date
   useEffect(() => {
     onTranscriptRef.current = onTranscript;
     onStateChangeRef.current = onStateChange;
@@ -83,36 +82,29 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
     }
 
     try {
-      // Convert ArrayBuffer to Float32Array (assume 16-bit PCM little-endian)
       const inputBytes = new Uint8Array(data);
       const sampleCount = Math.floor(inputBytes.length / 2);
       const float32 = new Float32Array(sampleCount);
 
       const view = new DataView(data);
       for (let i = 0; i < sampleCount; i++) {
-        const int16 = view.getInt16(i * 2, true); // little-endian
+        const int16 = view.getInt16(i * 2, true);
         float32[i] = int16 / 32768.0;
       }
 
-      // Notify callback
       if (onAudioReceivedRef.current) {
         onAudioReceivedRef.current(float32);
       }
 
-      // Create AudioBuffer
       const audioBuffer = ctx.createBuffer(1, sampleCount, SAMPLE_RATE);
       audioBuffer.copyToChannel(float32, 0, 0);
 
-      // Play through analyser → destination
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(analyser);
       source.start();
 
-      console.log("[AudioSocket] Playing audio frame", {
-        samples: sampleCount,
-        durationMs: (sampleCount / SAMPLE_RATE) * 1000,
-      });
+      console.log(`[AudioSocket] Playing audio frame: ${sampleCount} samples (${(sampleCount / SAMPLE_RATE * 1000).toFixed(0)}ms)`);
     } catch (err) {
       console.error("[AudioSocket] Error playing audio frame:", err);
     }
@@ -128,17 +120,16 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
       return;
     }
 
-    console.log("[AudioSocket] Text message received:", msg);
+    console.log("[AudioSocket] Text message:", msg);
 
     switch (msg.type) {
       case "transcript":
         if (onTranscriptRef.current) {
-          // Handle both flat format (speaker/text) and nested format (event.type/event.text)
           const speaker = msg.speaker || msg.event?.type || msg.role || "assistant";
-          const text = msg.text || msg.event?.text || "";
+          const t = msg.text || msg.event?.text || "";
           onTranscriptRef.current({
             role: speaker === "agent" ? "assistant" : speaker,
-            text,
+            text: t,
             timestamp: msg.timestamp || Date.now(),
           });
         }
@@ -152,8 +143,6 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
             onStateChangeRef.current(newState);
           }
           console.log("[AudioSocket] Pipeline state →", newState);
-        } else {
-          console.warn("[AudioSocket] Unknown pipeline state:", msg.state);
         }
         break;
 
@@ -182,14 +171,24 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
     console.log("[AudioSocket] Starting call…");
     setConnectionState("connecting");
 
-    // 1. Set up AudioContext for playback
+    // 1. Set up AudioContext for playback + capture
     const ctx = ensureAudioContext();
     if (ctx.state === "suspended") {
       await ctx.resume();
       console.log("[AudioSocket] AudioContext resumed");
     }
 
-    // 2. Capture microphone
+    // 2. Load AudioWorklet module
+    try {
+      await ctx.audioWorklet.addModule("/audio-processor.js");
+      console.log("[AudioSocket] AudioWorklet module loaded");
+    } catch (err) {
+      console.error("[AudioSocket] Failed to load AudioWorklet module:", err);
+      setConnectionState("failed");
+      return;
+    }
+
+    // 3. Capture microphone at 16kHz
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -197,6 +196,7 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          sampleRate: SAMPLE_RATE,
         },
       });
       localStreamRef.current = stream;
@@ -205,32 +205,32 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
         settings: stream.getAudioTracks()[0]?.getSettings(),
       });
 
-      // 3. Create MediaRecorder
-      const recorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm;codecs=opus",
+      // 4. Create AudioWorkletNode for capture
+      const sourceNode = ctx.createMediaStreamSource(stream);
+      const workletNode = new AudioWorkletNode(ctx, "audio-capture-processor", {
+        processorOptions: { bufferSize: 3200 }, // 100ms at 16kHz
       });
-      mediaRecorderRef.current = recorder;
+      audioNodeRef.current = workletNode;
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+      // Connect: source → worklet (but NOT to destination — we don't want to hear ourselves)
+      sourceNode.connect(workletNode);
+
+      // Listen for PCM data from the worklet
+      workletNode.port.onmessage = (event) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN && !isMutedRef.current) {
+          // Send raw PCM ArrayBuffer as binary WS frame
           wsRef.current.send(event.data);
         }
       };
 
-      recorder.onerror = (event) => {
-        console.error("[AudioSocket] MediaRecorder error:", event);
-      };
-
-      recorder.onstop = () => {
-        console.log("[AudioSocket] MediaRecorder stopped");
-      };
+      console.log("[AudioSocket] AudioWorklet capture pipeline started");
     } catch (err) {
-      console.error("[AudioSocket] Failed to access microphone:", err);
+      console.error("[AudioSocket] Failed to set up audio capture:", err);
       setConnectionState("failed");
       return;
     }
 
-    // 4. Connect WebSocket
+    // 5. Connect WebSocket
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/audio`;
     console.log("[AudioSocket] Connecting WebSocket to", wsUrl);
@@ -240,16 +240,9 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("[AudioSocket] WebSocket connected");
+      console.log("[AudioSocket] ✅ WebSocket connected");
       setConnectionState("connected");
       setPipelineState("listening");
-
-      // Start sending mic audio
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
-        mediaRecorderRef.current.start(100); // 100ms timeslice
-        console.log("[AudioSocket] MediaRecorder started (100ms timeslice)");
-      }
-
       if (onStateChangeRef.current) {
         onStateChangeRef.current("listening");
       }
@@ -257,10 +250,8 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
 
     ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        // Binary frame → audio
         playAudioFrame(event.data);
       } else if (typeof event.data === "string") {
-        // Text frame → JSON control message
         handleTextMessage(event.data);
       } else {
         console.warn("[AudioSocket] Unknown message format:", typeof event.data);
@@ -273,18 +264,9 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
     };
 
     ws.onclose = (event) => {
-      console.log("[AudioSocket] WebSocket closed", {
-        code: event.code,
-        reason: event.reason,
-        wasClean: event.wasClean,
-      });
+      console.log("[AudioSocket] WebSocket closed", { code: event.code, reason: event.reason });
       setConnectionState("ended");
       setPipelineState("idle");
-
-      // Stop MediaRecorder
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        mediaRecorderRef.current.stop();
-      }
     };
   }, [ensureAudioContext, playAudioFrame, handleTextMessage]);
 
@@ -292,23 +274,21 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
   const endCall = useCallback(() => {
     console.log("[AudioSocket] Ending call…");
 
-    // Send end session message if WS is open
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(JSON.stringify({ type: "end_session" }));
-        console.log("[AudioSocket] Sent end_session to server");
       } catch (err) {
         console.error("[AudioSocket] Error sending end_session:", err);
       }
     }
 
-    // Stop MediaRecorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
+    // Disconnect AudioWorkletNode
+    if (audioNodeRef.current) {
+      audioNodeRef.current.disconnect();
+      audioNodeRef.current = null;
     }
-    mediaRecorderRef.current = null;
 
-    // Stop all mic tracks
+    // Stop mic tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         track.stop();
@@ -335,24 +315,11 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
     isMutedRef.current = newMuted;
     setIsMuted(newMuted);
 
-    // Mute/unmute the audio track
     if (localStreamRef.current) {
       const audioTrack = localStreamRef.current.getAudioTracks()[0];
       if (audioTrack) {
         audioTrack.enabled = !newMuted;
-        console.log("[AudioSocket] Mic", newMuted ? "MUTED" : "UNMUTED", {
-          trackLabel: audioTrack.label,
-          enabled: audioTrack.enabled,
-        });
-      }
-    }
-
-    // Also pause/resume MediaRecorder for efficiency
-    if (mediaRecorderRef.current) {
-      if (newMuted && mediaRecorderRef.current.state === "recording") {
-        // We keep the recorder running but track is disabled — this sends silence
-        // Alternatively could pause, but track.enabled is the standard approach
-        console.log("[AudioSocket] MediaRecorder still running (track disabled)");
+        console.log("[AudioSocket] Mic", newMuted ? "MUTED" : "UNMUTED");
       }
     }
   }, []);
@@ -360,41 +327,30 @@ export function useAudioSocket(options: UseAudioSocketOptions = {}): UseAudioSoc
   // ── Barge in ──────────────────────────────────────────────────────────
   const bargeIn = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const bargeMsg = JSON.stringify({ type: "barge_in" });
-      wsRef.current.send(bargeMsg);
+      wsRef.current.send(JSON.stringify({ type: "barge_in" }));
       console.log("[AudioSocket] Sent barge_in");
       setPipelineState("listening");
       if (onStateChangeRef.current) {
         onStateChangeRef.current("listening");
       }
-    } else {
-      console.warn("[AudioSocket] Cannot barge_in — WebSocket not connected");
     }
   }, []);
 
   // ── Cleanup on unmount ────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      // Stop MediaRecorder
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        mediaRecorderRef.current.stop();
+      if (audioNodeRef.current) {
+        audioNodeRef.current.disconnect();
       }
-
-      // Stop mic tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
-
-      // Close WebSocket
       if (wsRef.current) {
         wsRef.current.close(1000, "Component unmounted");
       }
-
-      // Close AudioContext
       if (audioContextRef.current && audioContextRef.current.state !== "closed") {
         audioContextRef.current.close();
       }
-
       console.log("[AudioSocket] Cleanup complete");
     };
   }, []);

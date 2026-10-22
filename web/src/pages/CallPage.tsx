@@ -34,7 +34,7 @@ export default function CallPage() {
 
   // Fetch agent config on mount — use slug endpoint if slug is present
   useEffect(() => {
-    const url = slug ? `/api/agent/${slug}` : "/api/agent";
+    const url = slug ? `/api/agents/${slug}` : "/api/agent";
     fetch(url)
       .then((res) => res.json())
       .then((data) => setAgentInfo(data))
