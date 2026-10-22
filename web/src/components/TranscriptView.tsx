@@ -1,4 +1,4 @@
-import type { TranscriptEntry } from "../App";
+import type { TranscriptEntry } from "../types";
 
 interface TranscriptViewProps {
   transcript: TranscriptEntry[];

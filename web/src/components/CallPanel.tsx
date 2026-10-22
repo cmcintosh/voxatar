@@ -1,4 +1,4 @@
-import type { AgentInfo } from "../App";
+import type { AgentInfo } from "../types";
 import type { ConnectionState } from "../hooks/useWebRTC";
 
 interface CallPanelProps {

@@ -4,7 +4,7 @@ export type ConnectionState = "idle" | "connecting" | "connected" | "failed" | "
 
 interface UseWebRTCOptions {
   onTranscript: (entry: {
-    type: string;
+    type: "user" | "agent" | "system";
     text: string;
     timestamp: number;
     isPartial?: boolean;
@@ -23,7 +23,7 @@ export function useWebRTC({ onTranscript }: UseWebRTCOptions): UseWebRTCReturn {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  // audioContextRef removed — unused
 
   const startCall = useCallback(async () => {
     try {

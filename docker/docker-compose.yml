@@ -1,4 +1,4 @@
-# Voxatar Docker Compose — Phase 1 MVP
+# Voxatar Docker Compose — Phase 1.5
 #
 # Usage:
 #   docker compose up
@@ -18,17 +18,19 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Agent configs
+      # Agent configs (shareable agent links)
+      - ../examples:/app/agents:ro
+      # Example configs also mounted for CLI default
       - ../examples:/app/examples:ro
       # Models (faster-whisper will cache here)
       - voxatar-models:/root/.cache
-      # Knowledge base (Phase 2)
-      - ../knowledge:/app/knowledge:ro
+      # Persistent data: SQLite database
+      - voxatar-data:/app/data
       # Avatars (Phase 2)
       - ../avatars:/app/avatars:ro
     command: >
       voxatar serve
-      --agent examples/simple-agent.yaml
+      --agent /app/agents/simple-agent.yaml
       --host 0.0.0.0
       --port 8080
       --ollama-url http://host.docker.internal:11434/v1
@@ -54,4 +56,5 @@ services:
 
 volumes:
   voxatar-models:
+  voxatar-data:
   # ollama-models:

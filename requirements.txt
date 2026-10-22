@@ -1,4 +1,4 @@
-# Voxatar Phase 1 MVP — Python dependencies
+# Voxatar Phase 1.5 — Python dependencies
 
 # Web server
 fastapi>=0.104.0
@@ -31,3 +31,11 @@ click>=8.1.7
 
 # Logging
 structlog>=23.2.0
+
+# Phase 1.5 — Knowledge Base / RAG
+chromadb>=0.4.22
+pypdf>=4.0.0
+python-docx>=1.1.0
+
+# Phase 1.5 — Post-call processing
+# (uses standard sqlite3, no extra deps needed)

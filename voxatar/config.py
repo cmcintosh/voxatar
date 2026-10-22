@@ -59,6 +59,13 @@ class AgentConfig:
 
     # Knowledge base
     knowledge_sources: list[str] = field(default_factory=list)
+    knowledge_persist_dir: str = "/app/data/chromadb"
+    knowledge_documents_dir: str = "/app/data/documents"
+    knowledge_embedding_model: str = "nomic-embed-text"
+    knowledge_ollama_url: str = "http://host.docker.internal:11434"
+
+    # Conversation flow
+    flow_mode: str = "guided"  # "guided" or "freeform"
 
     # Server settings
     host: str = "0.0.0.0"
@@ -68,6 +75,12 @@ class AgentConfig:
     # Post-call
     generate_summary: bool = True
     extract_action_items: bool = True
+    extract_key_topics: bool = True
+    analyze_sentiment: bool = True
+    generate_scorecard: bool = True
+
+    # Agent configs directory (for shareable links)
+    agents_dir: str = "/app/agents"
 
     # Privacy
     require_consent: bool = True
@@ -122,6 +135,12 @@ class AgentConfig:
             "predefined_questions": "predefined_questions",
             "max_duration": "max_duration",
             "knowledge_sources": "knowledge_sources",
+            "knowledge_persist_dir": "knowledge_persist_dir",
+            "knowledge_documents_dir": "knowledge_documents_dir",
+            "knowledge_embedding_model": "knowledge_embedding_model",
+            "knowledge_ollama_url": "knowledge_ollama_url",
+            "flow_mode": "flow_mode",
+            "agents_dir": "agents_dir",
             "host": "host",
             "port": "port",
             "generate_summary": "generate_summary",

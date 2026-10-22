@@ -27,7 +27,7 @@ export default function Controls({
         {!inCall ? (
           <button
             onClick={onStartCall}
-            disabled={connectionState === "connecting"}
+            disabled={false}
             className="flex items-center gap-2 px-6 py-3 bg-green-600 text-white font-medium rounded-xl hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <svg

@@ -10,12 +10,19 @@ Handles:
 - Barge-in (interruption) handling
 - Conversation history management
 - Transcript events for the frontend
+- Conversation flow management (Phase 1.5)
+- Real-time SQLite persistence (Phase 1.5)
+- RAG context injection (Phase 1.5)
+- Post-call processing (Phase 1.5)
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncIterator, Callable, Optional
@@ -72,12 +79,52 @@ class VoiceAgentPipeline:
         self._session_start: Optional[float] = None
         self._barge_in_event = asyncio.Event()
 
+        # Phase 1.5 — Conversation flow manager
+        self.flow_manager: Optional[FlowManager] = None
+        try:
+            from voxatar.flow.manager import FlowManager
+            if config.objectives:
+                self.flow_manager = FlowManager(
+                    objectives=config.objectives,
+                    mode=config.flow_mode,
+                )
+        except ImportError:
+            logger.warning("FlowManager not available — flow guidance disabled")
+
+        # Phase 1.5 — Knowledge base / RAG
+        self.rag_pipeline: Optional[RAGPipeline] = None
+        try:
+            from voxatar.knowledge.rag import RAGPipeline
+            self.rag_pipeline = RAGPipeline(
+                persist_dir=config.knowledge_persist_dir,
+                ollama_url=config.knowledge_ollama_url,
+            )
+        except ImportError:
+            logger.warning("RAGPipeline not available — knowledge base disabled")
+
+        # Phase 1.5 — SQLite persistence
+        self.database: Optional[CallDatabase] = None
+        try:
+            from voxatar.storage.database import CallDatabase
+            self.database = CallDatabase()
+        except ImportError:
+            logger.warning("CallDatabase not available — persistence disabled")
+
+        # Phase 1.5 — Call ID for persistence
+        self.call_id: str = str(uuid.uuid4())
+
     async def initialize(self) -> None:
         """Initialize all pipeline components."""
         logger.info(f"Initializing pipeline for agent: {self.config.name}")
         logger.info(f"  STT: whisper ({self.config.stt_model})")
         logger.info(f"  LLM: ollama ({self.config.llm_model})")
         logger.info(f"  TTS: edge-tts")
+        if self.flow_manager:
+            logger.info(f"  Flow: {self.config.flow_mode} mode, {len(self.config.objectives)} objectives")
+        if self.rag_pipeline:
+            logger.info(f"  RAG: enabled (chromadb at {self.config.knowledge_persist_dir})")
+        if self.database:
+            logger.info(f"  Persistence: SQLite at {self.database.db_path}")
 
         # Initialize STT
         self.stt = WhisperSTT(
@@ -111,6 +158,17 @@ class VoiceAgentPipeline:
         self._session_start = time.time()
         self.state = SessionState.LISTENING
 
+        # Phase 1.5 — Create call record in database
+        if self.database:
+            try:
+                self.database.create_call(
+                    call_id=self.call_id,
+                    agent_name=self.config.name,
+                    start_time=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self._session_start)),
+                )
+            except Exception as e:
+                logger.error(f"Failed to create call record: {e}")
+
         logger.info("Pipeline initialized — ready for conversation")
 
     def on_transcript(self, callback: Callable[[TranscriptEvent], None]) -> None:
@@ -136,6 +194,9 @@ class VoiceAgentPipeline:
         logger.info(f"User said: {text}")
         self._emit_transcript("user", text)
         self.conversation_history.append(Message(role="user", content=text))
+
+        # Phase 1.5 — Save transcript entry to database
+        self._save_transcript("user", text)
 
         # Generate and speak the response
         await self._generate_and_speak()
@@ -199,6 +260,9 @@ class VoiceAgentPipeline:
         self._emit_transcript("user", text)
         self.conversation_history.append(Message(role="user", content=text))
 
+        # Phase 1.5 — Save transcript entry to database
+        self._save_transcript("user", text)
+
         # Generate and speak response
         await self._generate_and_speak()
 
@@ -207,13 +271,33 @@ class VoiceAgentPipeline:
         self.state = SessionState.THINKING
         self.is_speaking = True
 
+        # Phase 1.5 — Build dynamic system prompt with flow guidance and RAG context
+        system_prompt = self.config.system_prompt
+        knowledge_context = None
+
+        # Add flow guidance
+        if self.flow_manager:
+            flow_guidance = self.flow_manager.get_flow_guidance()
+            if flow_guidance:
+                system_prompt = system_prompt + "\n\n" + flow_guidance
+
+        # Add RAG context from last user message
+        if self.rag_pipeline and self.conversation_history:
+            last_user_msg = self.conversation_history[-1].content
+            try:
+                knowledge_context = await self.rag_pipeline.get_context_for_prompt(last_user_msg)
+            except Exception as e:
+                logger.warning(f"RAG retrieval failed: {e}")
+                knowledge_context = None
+
         # Stream LLM response
         response_text = ""
         text_chunks = []
 
         async for token in self.llm.generate_stream(
             messages=self.conversation_history,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
+            knowledge_context=knowledge_context,
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
         ):
@@ -232,6 +316,14 @@ class VoiceAgentPipeline:
             self.conversation_history.append(
                 Message(role="assistant", content=response_text)
             )
+
+            # Phase 1.5 — Save transcript entry to database
+            self._save_transcript("agent", response_text)
+
+            # Phase 1.5 — Update flow manager
+            if self.flow_manager and self.conversation_history:
+                last_user = self.conversation_history[-2].content if len(self.conversation_history) >= 2 else ""
+                self.flow_manager.update(last_user, response_text)
 
             # Synthesize speech
             self.state = SessionState.SPEAKING
@@ -285,6 +377,21 @@ class VoiceAgentPipeline:
             except Exception as e:
                 logger.error(f"Transcript callback error: {e}")
 
+    def _save_transcript(self, speaker: str, text: str) -> None:
+        """Save a transcript entry to the SQLite database."""
+        if not self.database:
+            return
+        try:
+            self.database.save_transcript_entry(
+                call_id=self.call_id,
+                timestamp=time.time(),
+                speaker=speaker,
+                text=text,
+                is_partial=False,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save transcript entry: {e}")
+
     async def handle_interruption(self) -> None:
         """Handle barge-in when user speaks while agent is talking."""
         self.is_speaking = False
@@ -301,9 +408,59 @@ class VoiceAgentPipeline:
         duration = time.time() - self._session_start if self._session_start else 0
         logger.info(f"Agent session ended (duration: {duration:.1f}s)")
 
-        # Generate summary if enabled
-        if self.config.generate_summary and self.conversation_history:
-            await self._generate_summary()
+        # Phase 1.5 — Post-call processing
+        if self.conversation_history:
+            await self._run_post_call_processing(duration)
+
+        # Phase 1.5 — Update call record in database
+        if self.database:
+            try:
+                end_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+                objectives_met = []
+                if self.flow_manager:
+                    objectives_met = self.flow_manager.covered_objectives
+                self.database.update_call_end(
+                    call_id=self.call_id,
+                    end_time=end_time,
+                    duration=duration,
+                    summary="",
+                    status="completed",
+                    objectives_met=json.dumps(objectives_met),
+                )
+            except Exception as e:
+                logger.error(f"Failed to update call record: {e}")
+
+    async def _run_post_call_processing(self, duration: float) -> None:
+        """Run post-call processing: summary, action items, scorecard."""
+        try:
+            from voxatar.postcall.processor import PostCallProcessor
+
+            if not self.llm or not self.database:
+                return
+
+            processor = PostCallProcessor(llm=self.llm, database=self.database)
+            record = await processor.process_call(
+                call_id=self.call_id,
+                agent_name=self.config.name,
+                conversation_history=self.conversation_history,
+                objectives=self.config.objectives,
+                start_time=self._session_start or time.time(),
+            )
+
+            # Update call record with summary
+            self.database.update_call_end(
+                call_id=self.call_id,
+                end_time=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+                duration=duration,
+                summary=record.summary,
+                status="completed",
+                objectives_met=json.dumps(record.scorecard and [e.objective for e in record.scorecard if e.status == "achieved"] or []),
+            )
+
+            logger.info(f"Post-call processing complete: {len(record.action_items)} action items, scorecard with {len(record.scorecard)} entries")
+
+        except Exception as e:
+            logger.error(f"Post-call processing failed: {e}", exc_info=True)
 
     async def _generate_summary(self) -> str:
         """Generate a post-call summary using the LLM."""

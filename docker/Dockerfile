@@ -1,4 +1,4 @@
-# Voxatar Dockerfile — Phase 1 MVP
+# Voxatar Dockerfile — Phase 1.5
 FROM python:3.11-slim
 
 # System dependencies for audio processing
@@ -23,6 +23,9 @@ COPY . /app
 WORKDIR /app
 RUN pip install --no-cache-dir -e .
 
+# Create data directories for SQLite, ChromaDB, and documents
+RUN mkdir -p /app/data/chromadb /app/data/documents /app/agents
+
 # Expose WebRTC signaling port
 EXPOSE 8080
 
@@ -31,4 +34,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/api/health || exit 1
 
 # Default command
-CMD ["voxatar", "serve", "--agent", "examples/simple-agent.yaml", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["voxatar", "serve", "--agent", "/app/agents/simple-agent.yaml", "--host", "0.0.0.0", "--port", "8080"]

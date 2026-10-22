@@ -7,17 +7,33 @@ Provides:
 - WebSocket endpoint for transcript streaming (/ws/transcript)
 - Static file serving for the web frontend
 - Health check endpoint
+- Post-call API endpoints (/api/calls, /api/calls/{id}, etc.)
+- Knowledge base endpoints (/api/knowledge/upload, etc.)
+- Shareable agent links (/c/{agent_slug})
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+import yaml
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    Request,
+    UploadFile,
+    File,
+    HTTPException,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from voxatar.config import AgentConfig
@@ -36,6 +52,9 @@ class VoxatarServer:
     - WebRTC peer connections
     - WebSocket connections for transcript streaming
     - Static frontend serving
+    - Call history API
+    - Knowledge base API
+    - Shareable agent links
     """
 
     def __init__(self, config: AgentConfig):
@@ -43,11 +62,36 @@ class VoxatarServer:
         self.app = FastAPI(
             title="Voxatar",
             description="Open-source AI voice agent server",
-            version="0.1.0",
+            version="0.1.5",
         )
         self.pipeline: Optional[VoiceAgentPipeline] = None
         self.transport: Optional[WebRTCTransport] = None
         self._websocket_clients: list[WebSocket] = []
+
+        # Phase 1.5 — Initialize database
+        self.database = None
+        try:
+            from voxatar.storage.database import CallDatabase
+            self.database = CallDatabase()
+        except ImportError:
+            logger.warning("CallDatabase not available — call history disabled")
+
+        # Phase 1.5 — Initialize knowledge base manager
+        self.kb_manager = None
+        try:
+            from voxatar.knowledge.rag import RAGPipeline
+            from voxatar.knowledge.manager import KnowledgeBaseManager
+            rag = RAGPipeline(
+                persist_dir=config.knowledge_persist_dir,
+                ollama_url=config.knowledge_ollama_url,
+            )
+            self.kb_manager = KnowledgeBaseManager(
+                rag=rag,
+                storage_dir=config.knowledge_documents_dir,
+            )
+        except ImportError:
+            logger.warning("KnowledgeBase not available — RAG disabled")
+
         self._setup_middleware()
         self._setup_routes()
 
@@ -64,6 +108,8 @@ class VoxatarServer:
     def _setup_routes(self) -> None:
         """Set up all API routes."""
 
+        # ─── Health & Agent Info ───────────────────────────────────────
+
         @self.app.get("/api/health")
         async def health():
             """Health check endpoint."""
@@ -71,6 +117,12 @@ class VoxatarServer:
                 "status": "ok",
                 "agent": self.config.name,
                 "state": self.pipeline.state.value if self.pipeline else "uninitialized",
+                "version": "0.1.5",
+                "features": {
+                    "database": self.database is not None,
+                    "knowledge_base": self.kb_manager is not None,
+                    "flow_manager": bool(self.config.objectives),
+                },
             }
 
         @self.app.get("/api/agent")
@@ -86,8 +138,11 @@ class VoxatarServer:
                 "consent_message": self.config.consent_message,
                 "max_duration": self.config.max_duration,
                 "tts_voice": self.config.voice_id,
+                "flow_mode": self.config.flow_mode,
                 "available_voices": self.tts.list_voices() if self.tts else [],
             }
+
+        # ─── WebRTC & Session ──────────────────────────────────────────
 
         @self.app.post("/api/webrtc/offer")
         async def webrtc_offer(request: Request):
@@ -184,20 +239,255 @@ class VoxatarServer:
                             await self.pipeline.handle_interruption()
 
             except WebSocketDisconnect:
-                self._websocket_clients.remove(ws)
+                if ws in self._websocket_clients:
+                    self._websocket_clients.remove(ws)
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
                 if ws in self._websocket_clients:
                     self._websocket_clients.remove(ws)
 
-        # Serve static frontend files
+        # ─── Call History API (Phase 1.5) ─────────────────────────────
+
+        @self.app.get("/api/calls")
+        async def list_calls(limit: int = 50, offset: int = 0):
+            """List all past calls."""
+            if not self.database:
+                raise HTTPException(status_code=503, detail="Database not available")
+            calls = self.database.get_calls(limit=limit, offset=offset)
+            return {"calls": calls, "total": len(calls)}
+
+        @self.app.get("/api/calls/{call_id}")
+        async def get_call(call_id: str):
+            """Get a specific call record."""
+            if not self.database:
+                raise HTTPException(status_code=503, detail="Database not available")
+            call = self.database.get_call(call_id)
+            if not call:
+                raise HTTPException(status_code=404, detail="Call not found")
+            action_items = self.database.get_action_items(call_id)
+            scorecard = self.database.get_scorecard(call_id)
+            return {
+                "call": call,
+                "action_items": action_items,
+                "scorecard": scorecard,
+            }
+
+        @self.app.get("/api/calls/{call_id}/transcript")
+        async def get_call_transcript(call_id: str):
+            """Get the full transcript for a call."""
+            if not self.database:
+                raise HTTPException(status_code=503, detail="Database not available")
+            transcript = self.database.get_transcript(call_id)
+            return {"call_id": call_id, "transcript": transcript}
+
+        @self.app.delete("/api/calls/{call_id}")
+        async def delete_call(call_id: str):
+            """Delete a call record."""
+            if not self.database:
+                raise HTTPException(status_code=503, detail="Database not available")
+            deleted = self.database.delete_call(call_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Call not found")
+            return {"status": "deleted", "call_id": call_id}
+
+        @self.app.post("/api/calls/{call_id}/export")
+        async def export_call(call_id: str, request: Request):
+            """Export a call as markdown or JSON."""
+            if not self.database:
+                raise HTTPException(status_code=503, detail="Database not available")
+
+            body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+            fmt = body.get("format", "markdown")
+
+            call = self.database.get_call(call_id)
+            if not call:
+                raise HTTPException(status_code=404, detail="Call not found")
+
+            transcript = self.database.get_transcript(call_id)
+            action_items = self.database.get_action_items(call_id)
+            scorecard = self.database.get_scorecard(call_id)
+
+            if fmt == "json":
+                export_data = {
+                    "call": call,
+                    "transcript": transcript,
+                    "action_items": action_items,
+                    "scorecard": scorecard,
+                }
+                return PlainTextResponse(
+                    content=json.dumps(export_data, indent=2),
+                    media_type="application/json",
+                    headers={"Content-Disposition": f"attachment; filename=call-{call_id}.json"},
+                )
+            else:
+                # Markdown export
+                md_lines = [
+                    f"# Call Report: {call.get('agent_name', 'Unknown')}",
+                    "",
+                    f"**Date:** {call.get('start_time', 'N/A')}",
+                    f"**Duration:** {call.get('duration', 0):.1f}s",
+                    f"**Status:** {call.get('status', 'N/A')}",
+                    "",
+                    "## Summary",
+                    "",
+                    call.get("summary", "No summary available."),
+                    "",
+                    "## Transcript",
+                    "",
+                ]
+                for entry in transcript:
+                    ts = entry.get("timestamp", 0)
+                    speaker = entry.get("speaker", "unknown")
+                    text = entry.get("text", "")
+                    md_lines.append(f"**[{speaker}]** ({ts}): {text}")
+                    md_lines.append("")
+
+                if action_items:
+                    md_lines.append("## Action Items")
+                    md_lines.append("")
+                    for item in action_items:
+                        status_badge = f" [{item.get('status', 'open')}]"
+                        assignee = f" — *{item.get('assignee', 'Unassigned')}*" if item.get("assignee") else ""
+                        due = f" (due: {item.get('due_date')})" if item.get("due_date") else ""
+                        md_lines.append(f"- {item.get('task', '')}{status_badge}{assignee}{due}")
+                    md_lines.append("")
+
+                if scorecard:
+                    md_lines.append("## Scorecard")
+                    md_lines.append("")
+                    md_lines.append("| Objective | Status | Notes |")
+                    md_lines.append("|-----------|--------|-------|")
+                    for entry in scorecard:
+                        md_lines.append(
+                            f"| {entry.get('objective', '')} | {entry.get('status', '')} | {entry.get('notes', '')} |"
+                        )
+                    md_lines.append("")
+
+                markdown = "\n".join(md_lines)
+                return PlainTextResponse(
+                    content=markdown,
+                    media_type="text/markdown",
+                    headers={"Content-Disposition": f"attachment; filename=call-{call_id}.md"},
+                )
+
+        # ─── Knowledge Base API (Phase 1.5) ───────────────────────────
+
+        @self.app.post("/api/knowledge/upload")
+        async def upload_document(file: UploadFile = File(...)):
+            """Upload a document to the knowledge base."""
+            if not self.kb_manager:
+                raise HTTPException(status_code=503, detail="Knowledge base not available")
+
+            content = await file.read()
+            content_type = file.content_type or "application/octet-stream"
+            filename = file.filename or "uploaded_document"
+
+            try:
+                result = await self.kb_manager.upload_document(
+                    filename=filename,
+                    content=content,
+                    content_type=content_type,
+                )
+                return result
+            except Exception as e:
+                logger.error(f"Document upload failed: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/knowledge/documents")
+        async def list_documents():
+            """List all documents in the knowledge base."""
+            if not self.kb_manager:
+                raise HTTPException(status_code=503, detail="Knowledge base not available")
+            return {"documents": self.kb_manager.list_documents()}
+
+        @self.app.delete("/api/knowledge/documents/{doc_id}")
+        async def delete_document(doc_id: str):
+            """Delete a document from the knowledge base."""
+            if not self.kb_manager:
+                raise HTTPException(status_code=503, detail="Knowledge base not available")
+            deleted = self.kb_manager.delete_document(doc_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Document not found")
+            return {"status": "deleted", "doc_id": doc_id}
+
+        # ─── Shareable Agent Links (Phase 1.5) ────────────────────────
+
+        @self.app.get("/api/agents")
+        async def list_agents():
+            """List all available agent configurations."""
+            agents_dir = Path(self.config.agents_dir)
+            if not agents_dir.exists():
+                return {"agents": []}
+
+            agents = []
+            for yaml_file in agents_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file) as f:
+                        data = yaml.safe_load(f)
+                    if data:
+                        slug = yaml_file.stem
+                        agents.append({
+                            "slug": slug,
+                            "name": data.get("name", slug),
+                            "role": data.get("role", ""),
+                            "organization": data.get("organization", ""),
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to parse agent config {yaml_file}: {e}")
+
+            return {"agents": agents}
+
+        @self.app.get("/api/agents/{slug}")
+        async def get_agent_by_slug(slug: str):
+            """Get agent configuration by URL slug."""
+            # Security: only allow alphanumeric, hyphens, underscores
+            if not slug.replace("-", "").replace("_", "").isalnum():
+                raise HTTPException(status_code=400, detail="Invalid agent slug")
+
+            agents_dir = Path(self.config.agents_dir)
+            yaml_file = agents_dir / f"{slug}.yaml"
+
+            if not yaml_file.exists():
+                raise HTTPException(status_code=404, detail="Agent not found")
+
+            try:
+                with open(yaml_file) as f:
+                    data = yaml.safe_load(f)
+                return data
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ─── Static Frontend Serving ──────────────────────────────────
+
         web_dir = Path(__file__).parent.parent / "web" / "dist"
         if web_dir.exists():
+            # Serve frontend assets
             self.app.mount(
-                "/",
-                StaticFiles(directory=str(web_dir), html=True),
-                name="frontend",
+                "/assets",
+                StaticFiles(directory=str(web_dir / "assets")),
+                name="frontend-assets",
             )
+
+            # SPA fallback: serve index.html for all non-API routes
+            @self.app.get("/{path:path}", response_class=HTMLResponse)
+            async def spa_fallback(path: str):
+                """Serve the React SPA for all non-API routes."""
+                # Skip API and WebSocket routes
+                if path.startswith("api/") or path.startswith("ws/"):
+                    raise HTTPException(status_code=404)
+
+                # Check for specific static files
+                file_path = web_dir / path
+                if file_path.exists() and file_path.is_file():
+                    return FileResponse(str(file_path))
+
+                # Return index.html for SPA routing
+                index_path = web_dir / "index.html"
+                if index_path.exists():
+                    return HTMLResponse(index_path.read_text())
+
+                raise HTTPException(status_code=404, detail="Not found")
+
             logger.info(f"Serving frontend from {web_dir}")
         else:
             # Fallback: serve a simple status page
