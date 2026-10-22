@@ -1,16 +1,8 @@
-# Voxatar Docker Compose — Phase 1.5
-#
-# Usage:
-#   docker compose up
-#
-# Then open http://localhost:8080 in your browser.
-
 services:
   voxatar:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: voxatar
     ports:
       - "8080:8080"
     environment:
@@ -18,43 +10,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Agent configs (shareable agent links)
-      - ../examples:/app/agents:ro
-      # Example configs also mounted for CLI default
-      - ../examples:/app/examples:ro
-      # Models (faster-whisper will cache here)
-      - voxatar-models:/root/.cache
-      # Persistent data: SQLite database
       - voxatar-data:/app/data
-      # Avatars (Phase 2)
-      - ../avatars:/app/avatars:ro
-    command: >
-      voxatar serve
-      --agent /app/agents/simple-agent.yaml
-      --host 0.0.0.0
-      --port 8080
-      --ollama-url http://host.docker.internal:11434/v1
+      - ../examples:/app/agents-read-only:ro
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      start_period: 15s
-      retries: 3
-
-  # Ollama service (optional — if running on host, comment this out)
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: voxatar-ollama
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ollama-models:/root/.ollama
-  #   # On Mac, Ollama runs better natively — use host Ollama instead
-  #   profiles:
-  #     - with-ollama
 
 volumes:
-  voxatar-models:
   voxatar-data:
-  # ollama-models:
