@@ -104,6 +104,26 @@ class VoxatarServer:
 
         self._setup_middleware()
         self._setup_routes()
+        self._setup_startup()
+
+    def _setup_startup(self) -> None:
+        """Pre-initialize pipeline on server startup so first connection is fast."""
+        @self.app.on_event("startup")
+        async def preinit_pipeline():
+            logger.info("[STARTUP] Pre-initializing pipeline (loading Whisper model)…")
+            try:
+                if not self.pipeline:
+                    self.pipeline = VoiceAgentPipeline(self.config)
+
+                    def on_transcript(event: TranscriptEvent):
+                        asyncio.ensure_future(self._broadcast_transcript(event))
+
+                    self.pipeline.on_transcript(on_transcript)
+
+                    await self.pipeline.initialize()
+                    logger.info("[STARTUP] Pipeline pre-initialized — ready for connections")
+            except Exception as exc:
+                logger.error(f"[STARTUP] Pipeline pre-init failed: {exc}", exc_info=True)
 
     def _setup_middleware(self) -> None:
         """Configure CORS and other middleware."""
@@ -265,8 +285,9 @@ class VoxatarServer:
 
             ws_transport = None
             try:
-                # Initialize pipeline if not already done
+                # Initialize pipeline if not already done (pre-init on startup)
                 if not self.pipeline:
+                    logger.info("[INFO] ws/audio: Pipeline not pre-initialized — initializing now")
                     self.pipeline = VoiceAgentPipeline(self.config)
 
                     # Set up transcript callback to broadcast to WebSocket clients
@@ -276,6 +297,8 @@ class VoxatarServer:
                     self.pipeline.on_transcript(on_transcript)
 
                     await self.pipeline.initialize()
+                else:
+                    logger.info("[INFO] ws/audio: Pipeline already initialized — ready")
 
                 # Start the pipeline audio processing loop if not already running
                 if not hasattr(self.pipeline, '_audio_loop_task') or self.pipeline._audio_loop_task is None:
