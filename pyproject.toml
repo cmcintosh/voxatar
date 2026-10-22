@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxatar"
+version = "0.1.0"
+description = "Open-source AI voice agents with cloned voices and real-time avatar video"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Wembassy / Voxatar Contributors"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "aiortc>=1.6.0",
+    "aiohttp>=3.9.0",
+    "faster-whisper>=1.0.0",
+    "httpx>=0.25.0",
+    "openai>=1.10.0",
+    "edge-tts>=6.1.9",
+    "pyyaml>=6.0.1",
+    "numpy>=1.24.0",
+    "pydantic>=2.5.0",
+    "click>=8.1.7",
+    "structlog>=23.2.0",
+]
+
+[project.scripts]
+voxatar = "voxatar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["voxatar*"]
+
+[tool.setuptools.package-data]
+voxatar = ["*.yaml", "*.yml"]
