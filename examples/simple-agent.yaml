@@ -1,0 +1,83 @@
+# Voxatar Agent Configuration — Simple Interview Agent
+# 
+# This is an example agent config for a technical screening interviewer.
+
+name: "Interview Bot"
+role: "Technical Recruiter"
+organization: "Acme Corp"
+
+# Component engines
+stt_engine: whisper
+llm_engine: ollama
+tts_engine: edge-tts
+transport_engine: webrtc
+
+# LLM settings
+llm_model: gemma4:12b
+llm_base_url: http://localhost:11434/v1
+temperature: 0.7
+max_tokens: 150
+
+# STT settings
+stt_model: base  # tiny, base, small, medium, large
+stt_language: en
+
+# TTS settings
+voice_id: en-US-AriaNeural  # Edge-TTS voice
+language: en
+
+# Conversation flow — hybrid: objectives + suggested questions
+objectives:
+  - "Screen candidate for Python experience"
+  - "Assess problem-solving ability"
+  - "Gauge cultural fit"
+  - "Collect salary expectations"
+
+predefined_questions:
+  - "Tell me about your experience with Python."
+  - "Describe a challenging project you worked on recently."
+  - "How do you approach debugging a complex issue?"
+  - "What are your salary expectations?"
+
+# System prompt (optional — if omitted, auto-built from objectives + questions)
+system_prompt: |
+  You are Interview Bot, a technical recruiter for Acme Corp conducting a screening interview.
+  
+  Keep your responses concise (1-3 sentences) and conversational.
+  Ask follow-up questions naturally based on the candidate's responses.
+  Be professional but friendly. 
+  
+  Your objectives:
+  - Screen candidate for Python experience
+  - Assess problem-solving ability
+  - Gauge cultural fit
+  - Collect salary expectations
+  
+  Suggested questions to work into the conversation:
+  - Tell me about your experience with Python.
+  - Describe a challenging project you worked on recently.
+  - How do you approach debugging a complex issue?
+  - What are your salary expectations?
+  
+  Don't ask all questions at once. Let the conversation flow naturally.
+
+# Server settings
+host: 0.0.0.0
+port: 8080
+
+# Privacy
+require_consent: true
+consent_message: "This call may be recorded and transcribed for quality purposes. By continuing, you consent to audio recording and AI processing."
+data_retention_days: 30
+
+# Post-call
+generate_summary: true
+extract_action_items: true
+
+# Max call duration (seconds)
+max_duration: 1800
+
+# Avatar
+avatar:
+  image: ""
+  position: "right"
