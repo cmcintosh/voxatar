@@ -358,47 +358,47 @@ class VoiceAgentPipeline:
             logger.info(f"[INFO] pipeline: LLM latency={llm_latency:.3f}s — model={self.config.llm_model} — response=\"{response_text[:100]}\"")
 
             if response_text:
-            logger.info(f"[INFO] pipeline: Agent response: {response_text}")
-            self._emit_transcript("agent", response_text)
-            self.conversation_history.append(
-                Message(role="assistant", content=response_text)
-            )
+                logger.info(f"[INFO] pipeline: Agent response: {response_text}")
+                self._emit_transcript("agent", response_text)
+                self.conversation_history.append(
+                    Message(role="assistant", content=response_text)
+                )
 
-            # Phase 1.5 — Save transcript entry to database
-            self._save_transcript("agent", response_text)
+                # Phase 1.5 — Save transcript entry to database
+                self._save_transcript("agent", response_text)
 
-            # Phase 1.5 — Update flow manager
-            if self.flow_manager and self.conversation_history:
-                last_user = self.conversation_history[-2].content if len(self.conversation_history) >= 2 else ""
-                self.flow_manager.update(last_user, response_text)
+                # Phase 1.5 — Update flow manager
+                if self.flow_manager and self.conversation_history:
+                    last_user = self.conversation_history[-2].content if len(self.conversation_history) >= 2 else ""
+                    self.flow_manager.update(last_user, response_text)
 
-            # Synthesize speech with timing
-            logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.SPEAKING.value}")
-            self.state = SessionState.SPEAKING
-            await self._send_ws_state("speaking")
+                # Synthesize speech with timing
+                logger.info(f"[INFO] pipeline: State transition: {self.state.value} → {SessionState.SPEAKING.value}")
+                self.state = SessionState.SPEAKING
+                await self._send_ws_state("speaking")
 
-            word_count = len(response_text.split())
-            total_audio_bytes = 0
-            tts_start = time.time()
-            logger.info(f"[INFO] pipeline: TTS synthesis — words={word_count}")
+                word_count = len(response_text.split())
+                total_audio_bytes = 0
+                tts_start = time.time()
+                logger.info(f"[INFO] pipeline: TTS synthesis — words={word_count}")
 
-            async for audio_chunk in self.tts.synthesize_stream(
-                self._text_chunk_iterator(text_chunks),
-                voice_id=self.config.voice_id,
-                language=self.config.language,
-            ):
-                if self._barge_in_event.is_set():
-                    logger.info("[INFO] pipeline: TTS interrupted by barge-in")
-                    break
+                async for audio_chunk in self.tts.synthesize_stream(
+                    self._text_chunk_iterator(text_chunks),
+                    voice_id=self.config.voice_id,
+                    language=self.config.language,
+                ):
+                    if self._barge_in_event.is_set():
+                        logger.info("[INFO] pipeline: TTS interrupted by barge-in")
+                        break
 
-                if self._audio_out_callback:
-                    result = self._audio_out_callback(audio_chunk)
-                    if asyncio.iscoroutine(result):
-                        await result
-                total_audio_bytes += len(audio_chunk)
+                    if self._audio_out_callback:
+                        result = self._audio_out_callback(audio_chunk)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    total_audio_bytes += len(audio_chunk)
 
-            tts_latency = time.time() - tts_start
-            logger.info(f"[INFO] pipeline: TTS latency={tts_latency:.3f}s — words={word_count} — audio_size={total_audio_bytes} bytes")
+                tts_latency = time.time() - tts_start
+                logger.info(f"[INFO] pipeline: TTS latency={tts_latency:.3f}s — words={word_count} — audio_size={total_audio_bytes} bytes")
 
         except Exception as e:
             logger.error(f"[ERROR] pipeline: LLM/TTS error: {e}", exc_info=True)
