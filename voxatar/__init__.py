@@ -68,3 +68,14 @@ def get_avatar(name: str):
 def get_transport(name: str):
     """Get a registered transport engine."""
     return _REGISTRY["transport"].get(name)
+
+
+# Auto-register built-in adapters
+from voxatar.stt.whisper_adapter import WhisperSTT  # noqa: E402,F401
+from voxatar.llm.ollama_adapter import OllamaLLM  # noqa: E402,F401
+from voxatar.tts.edge_tts_adapter import EdgeTTS  # noqa: E402,F401
+from voxatar.transport.webrtc_adapter import WebRTCTransport  # noqa: E402,F401
+from voxatar.transport.websocket_adapter import WebSocketTransport  # noqa: E402,F401
+
+# Register WebSocket transport
+register_transport("websocket", WebSocketTransport)

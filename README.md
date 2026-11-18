@@ -13,87 +13,186 @@
 Voxatar is an open-source, locally-hosted alternative to Fireflies.ai voice agents. It enables you to deploy **AI-powered voice agents** that can:
 
 - 🗣️ **Conduct live, two-way voice conversations** — natural, real-time, with low latency
-- 🎭 **Use your own cloned voice** — from a 6-second audio sample
-- 📹 **Present as an AI avatar** — with real-time lip-sync video
+- 🎭 **Use your own cloned voice** — from a 6-second audio sample (Phase 2)
+- 📹 **Present as an AI avatar** — with real-time lip-sync video (Phase 2)
 - 📋 **Ask predefined questions** and follow up dynamically based on responses
-- 📚 **Reference knowledge bases** — upload docs, FAQs, and context for the agent
-- 📝 **Generate post-call summaries** — transcripts, action items, scorecards
-- 🔗 **Share via link, embed, or QR code** — anyone can join from a browser
+- 📚 **Reference knowledge bases** — upload docs, FAQs, and context for the agent (Phase 2)
+- 📝 **Generate post-call summaries** — transcripts, action items, scorecards (Phase 3)
 - 🔒 **Run entirely on your own infrastructure** — no cloud dependencies, no data leaves your machine
 
-## Why Voxatar?
+## Phase 1 MVP — Audio-Only Voice Agent
 
-Commercial voice agent platforms like Fireflies.ai charge monthly fees, lock your data in their cloud, and limit customization. Voxatar puts the entire pipeline — speech-to-text, LLM reasoning, text-to-speech, voice cloning, and avatar video — **on your own hardware**, under your control.
+This is the Phase 1 MVP: a working audio-only voice agent with STT → LLM → TTS over WebRTC.
 
-| Feature | Fireflies.ai | Voxatar |
-|---------|-------------|---------|
-| Self-hosted | ❌ | ✅ |
-| Open source | ❌ | ✅ (MIT) |
-| Voice cloning | ✅ (cloud) | ✅ (local) |
-| Avatar video | ✅ (cloud) | ✅ (local) |
-| Custom LLM | ❌ | ✅ (Ollama, vLLM, any OpenAI-compatible API) |
-| Knowledge base / RAG | ✅ (cloud) | ✅ (local docs) |
-| Data privacy | ⚠️ Cloud | ✅ Fully local |
-| Cost | $10-19/seat/mo + usage | Free (your hardware) |
-| Customization | Limited | Full source access |
+### What Works
+
+- ✅ **WebRTC audio transport** — browser captures mic, sends to server via WebRTC
+- ✅ **Speech-to-Text** — faster-whisper with VAD for accurate transcription
+- ✅ **LLM responses** — Ollama (Llama 3.1, Qwen, etc.) with streaming
+- ✅ **Text-to-Speech** — edge-tts for clear, natural speech output
+- ✅ **Real-time transcript** — WebSocket-based live transcript display
+- ✅ **Barge-in support** — interrupt the agent while it's speaking
+- ✅ **Agent configs** — YAML-based agent definitions with objectives and questions
+- ✅ **Docker Compose** — one command to run the full stack
+- ✅ **Consent management** — configurable consent banner
 
 ## Quick Start
+
+### Option 1: Docker Compose (Recommended)
 
 ```bash
 # Clone
 git clone https://github.com/cmcintosh/voxatar.git
 cd voxatar
 
-# Run with Docker (coming soon)
-docker compose up
+# Make sure Ollama is running and has the model
+ollama pull llama3.1:8b
 
-# Or run locally
+# Start the server
+docker compose -f docker/docker-compose.yml up
+```
+
+Open http://localhost:8080 in your browser and click "Start Call".
+
+### Option 2: Run Locally
+
+```bash
+# Clone
+git clone https://github.com/cmcintosh/voxatar.git
+cd voxatar
+
+# Install Python dependencies
 pip install -e .
-voxatar serve --agent examples/simple-agent.py
+
+# Make sure Ollama is running
+ollama serve  # if not already running
+ollama pull llama3.1:8b
+
+# Build the web frontend
+cd web
+npm install
+npm run build
+cd ..
+
+# Start the server
+voxatar serve --agent examples/simple-agent.yaml
+```
+
+Open http://localhost:8080 in your browser and click "Start Call".
+
+### Option 3: Development Mode
+
+```bash
+# Terminal 1: Start the Python server
+pip install -e .
+voxatar serve --agent examples/simple-agent.yaml
+
+# Terminal 2: Start the Vite dev server (hot reload)
+cd web
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 (Vite dev server proxies API to localhost:8080).
+
+## Configuration
+
+Agent configs are YAML files. See `examples/simple-agent.yaml` for a full example.
+
+```yaml
+name: "Interview Bot"
+role: "Technical Recruiter"
+organization: "Acme Corp"
+
+# LLM
+llm_model: llama3.1:8b
+llm_base_url: http://localhost:11434/v1
+system_prompt: "You are a technical recruiter..."
+
+# Conversation flow
+objectives:
+  - "Screen candidate for Python experience"
+  - "Assess problem-solving ability"
+predefined_questions:
+  - "Tell me about your experience with Python."
+```
+
+### CLI Options
+
+```bash
+# Use a specific agent config
+voxatar serve --agent examples/simple-agent.yaml
+
+# Override the LLM model
+voxatar serve --agent examples/simple-agent.yaml --model qwen2.5:7b
+
+# Custom Ollama URL
+voxatar serve --ollama-url http://192.168.1.100:11434/v1
+
+# Show agent info
+voxatar info --agent examples/simple-agent.yaml
 ```
 
 ## Architecture
 
 ```
-Browser Client (WebRTC) ←→ Signaling Server
-                              ↓
+Browser Client (WebRTC) ←→ FastAPI Signaling Server
+                                ↓
                     Voice Agent Pipeline
-                              ↓
+                                ↓
                     ┌─────────────────┐
-                    │   STT (Whisper)  │ ← Audio stream
+                    │   STT (Whisper)  │ ← Audio stream (faster-whisper + VAD)
                     └────────┬────────┘
                              ↓
                     ┌─────────────────┐
-                    │   LLM (Ollama)   │ ← Text + system prompt + knowledge base
+                    │   LLM (Ollama)   │ ← Text + system prompt + history
                     └────────┬────────┘
                              ↓
                     ┌─────────────────┐
-                    │  TTS (XTTS/F5)   │ ← Text → Audio (cloned voice)
+                    │  TTS (Edge-TTS)  │ ← Text → Audio (streaming)
                     └────────┬────────┘
                              ↓
-                    ┌─────────────────┐
-                    │ Lip Sync (MuseTalk) │ ← Audio + Face image → Video frames
-                    └────────┬────────┘
-                             ↓
-                    WebRTC video stream back to browser
+                    Audio stream back to browser via WebRTC
+                    
+                    WebSocket → Live transcript to browser
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical breakdown.
+### Components (Phase 1)
 
-## Components
+| Component | Purpose | Implementation | Alternatives |
+|-----------|---------|----------------|--------------|
+| **STT** | Speech-to-text | faster-whisper | whisper.cpp, Moonshine |
+| **LLM** | Conversation brain | Ollama (Llama 3.1) | Any OpenAI-compatible API |
+| **TTS** | Text-to-speech | edge-tts | Kokoro, XTTS v2 (Phase 2) |
+| **Transport** | Real-time audio | WebRTC (aiortc) | WebSocket fallback |
+| **Frontend** | Web UI | React + Vite + TailwindCSS | — |
 
-| Component | Purpose | Recommended | Alternatives |
-|-----------|---------|-------------|--------------|
-| **STT** | Speech-to-text, streaming | Whisper (whisper.cpp) | FunASR, Moonshine, Piper |
-| **LLM** | Conversation brain | Ollama (Llama 3, Qwen, GLM) | vLLM, any OpenAI-compatible API |
-| **TTS** | Text-to-speech + voice cloning | XTTS v2 | F5-TTS, Chatterbox, Kokoro, Piper |
-| **Avatar** | Lip-sync video generation | MuseTalk | SadTalker, LatentSync, LivePortrait |
-| **Transport** | Real-time audio/video | WebRTC (Pipecat) | WebSocket, aiortc |
+## Docker Setup
+
+The `docker-compose.yml` runs the Voxatar server and connects to your host Ollama instance:
+
+```yaml
+services:
+  voxatar:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+### Using Docker-Hosted Ollama
+
+To run Ollama in Docker too, uncomment the `ollama` service in `docker-compose.yml`.
 
 ## Roadmap
 
-- **Phase 1 (MVP):** Audio-only voice agent — STT → LLM → TTS pipeline over WebRTC
-- **Phase 2 (v1.0):** Voice cloning + avatar video + knowledge base RAG
+- **Phase 1 (MVP):** ✅ Audio-only voice agent — STT → LLM → TTS pipeline over WebRTC
+- **Phase 2 (v1.0):** Voice cloning (Kokoro/XTTS) + avatar video (MuseTalk) + knowledge base RAG (ChromaDB)
 - **Phase 3 (v2.0):** Multi-agent handoffs, post-call analytics, integrations
 
 See [ROADMAP.md](ROADMAP.md) for details.
@@ -102,17 +201,40 @@ See [ROADMAP.md](ROADMAP.md) for details.
 
 ```
 voxatar/
-├── voxatar/          # Python package (pipeline, components)
+├── voxatar/          # Python package
+│   ├── __init__.py   # Component registry
+│   ├── cli.py        # CLI entry point (voxatar serve)
+│   ├── config.py     # YAML config loading
+│   ├── server.py     # FastAPI server + WebRTC signaling
+│   ├── pipeline.py   # STT → LLM → TTS orchestration
 │   ├── stt/          # Speech-to-text adapters
-│   ├── tts/          # Text-to-speech + voice cloning
-│   ├── llm/          # LLM conversation management
-│   ├── avatar/       # Lip-sync / avatar video
-│   └── transport/    # WebRTC / WebSocket transport
-├── web/              # Frontend client
+│   │   └── whisper_adapter.py
+│   ├── llm/          # LLM adapters
+│   │   └── ollama_adapter.py
+│   ├── tts/          # Text-to-speech adapters
+│   │   └── edge_tts_adapter.py
+│   ├── transport/    # WebRTC transport
+│   │   └── webrtc_adapter.py
+│   └── avatar/       # Avatar (Phase 2)
+├── web/              # React frontend
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── components/
+│   │   │   ├── CallPanel.tsx
+│   │   │   ├── TranscriptView.tsx
+│   │   │   └── Controls.tsx
+│   │   └── hooks/
+│   │       └── useWebRTC.ts
+│   └── ...
 ├── docker/           # Docker setup
-├── docs/             # Documentation
+│   ├── Dockerfile
+│   └── docker-compose.yml
 ├── examples/         # Example agents
-└── tests/            # Test suite
+│   ├── simple-agent.yaml
+│   └── simple-agent.py
+├── requirements.txt
+├── pyproject.toml
+└── README.md
 ```
 
 ## Use Cases
@@ -122,13 +244,13 @@ voxatar/
 - **User Research:** Conduct interviews at scale with consistent question flows
 - **Customer Support:** Voice agents that can access your docs and FAQs
 - **Check-ins:** Automated wellness or status check-in calls
-- **Education:** Interactive tutoring sessions with avatar presence
+- **Education:** Interactive tutoring sessions
 
 ## Contributing
 
 We welcome contributions! This is an early-stage project with many areas to build.
 
-1. Check [open issues](https://github.com/cmcintosh/voxatar/issues) — look for `decision` and `wayfinder` labels
+1. Check [open issues](https://github.com/cmcintosh/voxatar/issues)
 2. Read [ARCHITECTURE.md](ARCHITECTURE.md) to understand the system design
 3. Check [ROADMAP.md](ROADMAP.md) for what's planned
 4. Open an issue or PR
@@ -139,13 +261,12 @@ MIT — see [LICENSE](LICENSE)
 
 ## Acknowledgments
 
-Voxatar builds on the shoulders of giants:
 - [Pipecat](https://github.com/pipecat-ai/pipecat) — real-time voice agent framework
-- [Whisper](https://github.com/openai/whisper) / [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — STT
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — fast Whisper inference
 - [Ollama](https://ollama.ai) — local LLM serving
-- [XTTS v2](https://github.com/coqui-ai/TTS) / [F5-TTS](https://github.com/SWivid/F5-TTS) — TTS + voice cloning
-- [MuseTalk](https://github.com/TMElyralab/MuseTalk) — real-time lip sync
-- [WebRTC](https://webrtc.org) — real-time transport
+- [edge-tts](https://github.com/rany2/edge-tts) — Microsoft Edge TTS
+- [aiortc](https://github.com/aiortc/aiortc) — WebRTC for Python
+- [React](https://react.dev) + [Vite](https://vitejs.dev) + [TailwindCSS](https://tailwindcss.com)
 
 ---
 
