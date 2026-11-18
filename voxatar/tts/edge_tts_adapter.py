@@ -25,10 +25,10 @@ voxatar.register_tts("edge-tts", None)  # placeholder, replaced below
 
 # Default English voices
 DEFAULT_VOICES = {
-    "en": "en-US-AriaNeural",
-    "en-US": "en-US-AriaNeural",
-    "en-GB": "en-GB-SoniaNeural",
-    "en-AU": "en-AU-NatashaNeural",
+    "en": "en-US-GuyNeural",
+    "en-US": "en-US-GuyNeural",
+    "en-GB": "en-GB-RyanNeural",
+    "en-AU": "en-AU-WilliamNeural",
 }
 
 # Curated voice list for the UI

@@ -23,7 +23,7 @@ stt_model: base  # tiny, base, small, medium, large
 stt_language: en
 
 # TTS settings
-voice_id: en-US-AriaNeural  # Edge-TTS voice
+voice_id: en-US-GuyNeural  # Edge-TTS voice (default male)
 language: en
 
 # Conversation flow — hybrid: objectives + suggested questions
